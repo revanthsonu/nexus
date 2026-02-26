@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useMemo } from "react"
 import * as d3 from "d3"
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis,
@@ -19,6 +19,7 @@ const C = {
   mutedLt: "#65607a",
   gridLine: "#eae6e0",
   highlight: "#fef3c7",
+  danger: "#ef4444",
 }
 
 const DOMAINS = {
@@ -105,6 +106,151 @@ const TOPIC_META = [
   { key: "PH", label: "Public Health", color: "#f97316" },
 ]
 
+// ── GRAPH ALGORITHMS ──────────────────────────────────────────────────────────
+
+function buildAdjList(nodes, edges) {
+  const adj = {}
+  nodes.forEach(n => { adj[n.id] = [] })
+  edges.forEach(([a, b]) => {
+    if (adj[a] && adj[b]) {
+      adj[a].push(b)
+      adj[b].push(a)
+    }
+  })
+  return adj
+}
+
+function computeDegreeCentrality(nodes, edges) {
+  const maxDegree = nodes.length - 1
+  const degree = {}
+  nodes.forEach(n => { degree[n.id] = 0 })
+  edges.forEach(([a, b]) => {
+    if (degree[a] !== undefined) degree[a]++
+    if (degree[b] !== undefined) degree[b]++
+  })
+  const result = {}
+  nodes.forEach(n => { result[n.id] = degree[n.id] / maxDegree })
+  return result
+}
+
+function computeBetweennessCentrality(nodes, edges) {
+  const adj = buildAdjList(nodes, edges)
+  const ids = nodes.map(n => n.id)
+  const bc = {}
+  ids.forEach(id => { bc[id] = 0 })
+
+  ids.forEach(s => {
+    // BFS from s
+    const stack = []
+    const pred = {}; ids.forEach(id => { pred[id] = [] })
+    const sigma = {}; ids.forEach(id => { sigma[id] = 0 }); sigma[s] = 1
+    const dist = {}; ids.forEach(id => { dist[id] = -1 }); dist[s] = 0
+    const queue = [s]
+
+    while (queue.length) {
+      const v = queue.shift()
+      stack.push(v)
+      for (const w of (adj[v] || [])) {
+        if (dist[w] < 0) {
+          queue.push(w)
+          dist[w] = dist[v] + 1
+        }
+        if (dist[w] === dist[v] + 1) {
+          sigma[w] += sigma[v]
+          pred[w].push(v)
+        }
+      }
+    }
+
+    const delta = {}; ids.forEach(id => { delta[id] = 0 })
+    while (stack.length) {
+      const w = stack.pop()
+      for (const v of pred[w]) {
+        delta[v] += (sigma[v] / sigma[w]) * (1 + delta[w])
+      }
+      if (w !== s) bc[w] += delta[w]
+    }
+  })
+
+  // Normalize
+  const n = ids.length
+  const norm = (n - 1) * (n - 2)
+  if (norm > 0) ids.forEach(id => { bc[id] /= norm })
+  return bc
+}
+
+function computePageRank(nodes, edges, damping = 0.85, iterations = 30) {
+  const adj = buildAdjList(nodes, edges)
+  const ids = nodes.map(n => n.id)
+  const N = ids.length
+  let pr = {}
+  ids.forEach(id => { pr[id] = 1 / N })
+
+  for (let i = 0; i < iterations; i++) {
+    const newPr = {}
+    ids.forEach(id => { newPr[id] = (1 - damping) / N })
+    ids.forEach(id => {
+      const neighbors = adj[id] || []
+      if (neighbors.length === 0) return
+      const share = pr[id] / neighbors.length
+      neighbors.forEach(nb => { newPr[nb] += damping * share })
+    })
+    pr = newPr
+  }
+  return pr
+}
+
+function countConnectedComponents(nodes, edges) {
+  const adj = buildAdjList(nodes, edges)
+  const visited = new Set()
+  let components = 0
+  const componentSizes = []
+
+  nodes.forEach(n => {
+    if (!visited.has(n.id)) {
+      components++
+      let size = 0
+      const queue = [n.id]
+      while (queue.length) {
+        const v = queue.shift()
+        if (visited.has(v)) continue
+        visited.add(v)
+        size++
+          ; (adj[v] || []).forEach(nb => { if (!visited.has(nb)) queue.push(nb) })
+      }
+      componentSizes.push(size)
+    }
+  })
+  return { components, componentSizes, largestComponent: Math.max(...componentSizes, 0) }
+}
+
+function computeNetworkDensity(nodeCount, edgeCount) {
+  if (nodeCount < 2) return 0
+  return (2 * edgeCount) / (nodeCount * (nodeCount - 1))
+}
+
+function computeInterdisciplinaryScore(nodeId, edges, nodes) {
+  const nodeMap = {}
+  nodes.forEach(n => { nodeMap[n.id] = n })
+  const neighborDomains = {}
+  edges.forEach(([a, b]) => {
+    if (a === nodeId && nodeMap[b]) {
+      const d = nodeMap[b].domain
+      neighborDomains[d] = (neighborDomains[d] || 0) + 1
+    }
+    if (b === nodeId && nodeMap[a]) {
+      const d = nodeMap[a].domain
+      neighborDomains[d] = (neighborDomains[d] || 0) + 1
+    }
+  })
+  const counts = Object.values(neighborDomains)
+  const total = counts.reduce((s, c) => s + c, 0)
+  if (total <= 1) return 0
+  // Simpson's Diversity Index: 1 - Σ(p_i²)
+  const simpson = 1 - counts.reduce((s, c) => s + (c / total) ** 2, 0)
+  return simpson
+}
+
 // ── SHARED COMPONENTS ────────────────────────────────────────────────────────
 const StatCard = ({ label, value, sub, color }) => (
   <div style={{
@@ -148,7 +294,7 @@ const CustomTooltipBase = ({ active, payload, label, formatter }) => {
 }
 
 // ── NETWORK GRAPH ─────────────────────────────────────────────────────────────
-function NetworkGraph({ domainFilter, onSelect, selected }) {
+function NetworkGraph({ domainFilter, onSelect, selected, removedNode }) {
   const svgRef = useRef()
   const simRef = useRef()
   const [tooltip, setTooltip] = useState(null)
@@ -171,6 +317,7 @@ function NetworkGraph({ domainFilter, onSelect, selected }) {
 
     const filteredNodes = NODES
       .filter(n => domainFilter === "ALL" || n.domain === domainFilter)
+      .filter(n => removedNode == null || n.id !== removedNode)
       .map(n => ({ ...n }))
     const idSet = new Set(filteredNodes.map(n => n.id))
     const filteredEdges = EDGES
@@ -183,7 +330,6 @@ function NetworkGraph({ domainFilter, onSelect, selected }) {
     svg.selectAll("*").remove()
     svg.attr("width", w).attr("height", h)
 
-    // Light-themed background grid
     const defs = svg.append("defs")
     const pat = defs.append("pattern")
       .attr("id", "grid").attr("width", 40).attr("height", 40)
@@ -193,7 +339,6 @@ function NetworkGraph({ domainFilter, onSelect, selected }) {
     svg.append("rect").attr("width", "100%").attr("height", "100%")
       .attr("fill", "url(#grid)").attr("opacity", 0.6)
 
-    // Drop shadow filter for nodes
     const filter = defs.append("filter").attr("id", "shadow")
       .attr("x", "-50%").attr("y", "-50%").attr("width", "200%").attr("height", "200%")
     filter.append("feDropShadow")
@@ -213,7 +358,6 @@ function NetworkGraph({ domainFilter, onSelect, selected }) {
       .data(filteredNodes).enter().append("g")
       .style("cursor", "pointer")
 
-    // Outer glow ring
     nodeSel.append("circle")
       .attr("r", d => rScale(d.funding) + 6)
       .attr("fill", "none")
@@ -221,7 +365,6 @@ function NetworkGraph({ domainFilter, onSelect, selected }) {
       .attr("stroke-width", 0.8)
       .attr("opacity", 0.15)
 
-    // Main circle
     nodeSel.append("circle")
       .attr("r", d => rScale(d.funding))
       .attr("fill", d => DOMAINS[d.domain].color)
@@ -230,7 +373,6 @@ function NetworkGraph({ domainFilter, onSelect, selected }) {
       .attr("stroke-width", 2)
       .attr("filter", "url(#shadow)")
 
-    // Labels (dark for light bg)
     nodeSel.append("text")
       .text(d => d.name)
       .attr("text-anchor", "middle")
@@ -286,7 +428,8 @@ function NetworkGraph({ domainFilter, onSelect, selected }) {
 
     simRef.current = sim
     return () => sim.stop()
-  }, [domainFilter, dims])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [domainFilter, dims, removedNode])
 
   return (
     <div style={{ position: "relative" }}>
@@ -359,14 +502,10 @@ function TrendsView() {
               ))}
             </defs>
             <CartesianGrid strokeDasharray="3 4" stroke={C.gridLine} vertical={false} />
-            <XAxis dataKey="year" stroke={C.border}
-              tick={{ fill: C.mutedLt, fontSize: 11 }} />
-            <YAxis stroke={C.border}
-              tick={{ fill: C.mutedLt, fontSize: 11 }}
-              tickFormatter={v => `$${v}B`} />
+            <XAxis dataKey="year" stroke={C.border} tick={{ fill: C.mutedLt, fontSize: 11 }} />
+            <YAxis stroke={C.border} tick={{ fill: C.mutedLt, fontSize: 11 }} tickFormatter={v => `$${v}B`} />
             <Tooltip content={<CustomTooltipBase formatter={v => `${v.toFixed(1)}B`} />} />
-            <Legend iconType="circle"
-              wrapperStyle={{ fontSize: 10, color: C.muted, paddingTop: 8 }} />
+            <Legend iconType="circle" wrapperStyle={{ fontSize: 10, color: C.muted, paddingTop: 8 }} />
             {Object.entries(DOMAINS).map(([k, d]) => (
               <Area key={k} type="monotone" dataKey={k} name={d.label}
                 stackId="1" stroke={d.color} strokeWidth={1.8}
@@ -376,7 +515,6 @@ function TrendsView() {
         </ResponsiveContainer>
       </div>
 
-      {/* Per-domain bar breakdown */}
       <div style={{
         background: C.card, border: `1px solid ${C.border}`,
         borderRadius: 10, padding: "20px 16px 12px", marginTop: 14,
@@ -389,15 +527,12 @@ function TrendsView() {
           2023 FUNDING BY DOMAIN  ·  SIDE-BY-SIDE COMPARISON
         </div>
         <ResponsiveContainer width="100%" height={200}>
-          <BarChart
-            data={[{ year: "2023", ...TRENDS[5] }]}
-            margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+          <BarChart data={[{ year: "2023", ...TRENDS[5] }]} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 4" stroke={C.gridLine} vertical={false} />
             <XAxis dataKey="year" stroke={C.border} tick={{ fill: C.mutedLt, fontSize: 11 }} />
             <YAxis stroke={C.border} tick={{ fill: C.mutedLt, fontSize: 11 }} tickFormatter={v => `$${v}B`} />
             <Tooltip content={<CustomTooltipBase formatter={v => `${v.toFixed(1)}B`} />} />
-            <Legend iconType="square"
-              wrapperStyle={{ fontSize: 10, color: C.muted, paddingTop: 8 }} />
+            <Legend iconType="square" wrapperStyle={{ fontSize: 10, color: C.muted, paddingTop: 8 }} />
             {Object.entries(DOMAINS).map(([k, d]) => (
               <Bar key={k} dataKey={k} name={d.label} fill={d.color} fillOpacity={0.85} radius={[4, 4, 0, 0]} />
             ))}
@@ -414,7 +549,6 @@ function TopicsView() {
   const mlGrowth = (((TOPICS[5].ML / TOPICS[0].ML) - 1) * 100).toFixed(0)
   const qcGrowth = (((TOPICS[5].QC / TOPICS[0].QC) - 1) * 100).toFixed(0)
   const nlpGrowth = (((TOPICS[5].NLP / TOPICS[0].NLP) - 1) * 100).toFixed(0)
-
   const displayTopics = active ? TOPIC_META.filter(t => t.key === active) : TOPIC_META
 
   return (
@@ -426,40 +560,26 @@ function TopicsView() {
         <StatCard label="Public Health Peak" value="2020" sub="COVID funding surge" color="#f97316" />
       </div>
 
-      {/* Topic toggle pills */}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
-        <button
-          onClick={() => setActive(null)}
-          style={{
-            background: !active ? C.accent : "transparent",
-            border: `1px solid ${!active ? C.accent : C.border}`,
-            color: !active ? "#fff" : C.muted,
-            borderRadius: 20, padding: "4px 12px",
-            fontSize: 10, cursor: "pointer",
-            letterSpacing: "0.1em", fontWeight: 600,
-          }}>ALL</button>
+        <button onClick={() => setActive(null)} style={{
+          background: !active ? C.accent : "transparent", border: `1px solid ${!active ? C.accent : C.border}`,
+          color: !active ? "#fff" : C.muted, borderRadius: 20, padding: "4px 12px",
+          fontSize: 10, cursor: "pointer", letterSpacing: "0.1em", fontWeight: 600,
+        }}>ALL</button>
         {TOPIC_META.map(t => (
-          <button key={t.key}
-            onClick={() => setActive(active === t.key ? null : t.key)}
-            style={{
-              background: active === t.key ? t.color : "transparent",
-              border: `1px solid ${active === t.key ? t.color : C.border}`,
-              color: active === t.key ? "#fff" : C.muted,
-              borderRadius: 20, padding: "4px 12px",
-              fontSize: 10, cursor: "pointer", fontWeight: 500,
-            }}>{t.label}</button>
+          <button key={t.key} onClick={() => setActive(active === t.key ? null : t.key)} style={{
+            background: active === t.key ? t.color : "transparent", border: `1px solid ${active === t.key ? t.color : C.border}`,
+            color: active === t.key ? "#fff" : C.muted, borderRadius: 20, padding: "4px 12px",
+            fontSize: 10, cursor: "pointer", fontWeight: 500,
+          }}>{t.label}</button>
         ))}
       </div>
 
       <div style={{
-        background: C.card, border: `1px solid ${C.border}`,
-        borderRadius: 10, padding: "20px 16px 12px",
+        background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "20px 16px 12px",
         boxShadow: "0 1px 3px rgba(0,0,0,0.04)"
       }}>
-        <div style={{
-          color: C.muted, fontSize: 10, fontWeight: 600,
-          letterSpacing: "0.14em", marginBottom: 14
-        }}>
+        <div style={{ color: C.muted, fontSize: 10, fontWeight: 600, letterSpacing: "0.14em", marginBottom: 14 }}>
           KEYWORD EVOLUTION  ·  GRANT COUNT  ·  2018–2023
         </div>
         <ResponsiveContainer width="100%" height={330}>
@@ -473,21 +593,227 @@ function TopicsView() {
               ))}
             </defs>
             <CartesianGrid strokeDasharray="3 4" stroke={C.gridLine} vertical={false} />
-            <XAxis dataKey="year" stroke={C.border}
-              tick={{ fill: C.mutedLt, fontSize: 11 }} />
-            <YAxis stroke={C.border}
-              tick={{ fill: C.mutedLt, fontSize: 11 }} />
+            <XAxis dataKey="year" stroke={C.border} tick={{ fill: C.mutedLt, fontSize: 11 }} />
+            <YAxis stroke={C.border} tick={{ fill: C.mutedLt, fontSize: 11 }} />
             <Tooltip content={<CustomTooltipBase formatter={v => `${v} grants`} />} />
-            <Legend iconType="circle"
-              wrapperStyle={{ fontSize: 10, color: C.muted, paddingTop: 8 }} />
+            <Legend iconType="circle" wrapperStyle={{ fontSize: 10, color: C.muted, paddingTop: 8 }} />
             {displayTopics.map(t => (
               <Area key={t.key} type="monotone" dataKey={t.key} name={t.label}
-                stackId={active ? undefined : "1"}
-                stroke={t.color} strokeWidth={active === t.key ? 2.5 : 1.6}
+                stackId={active ? undefined : "1"} stroke={t.color} strokeWidth={active === t.key ? 2.5 : 1.6}
                 fill={`url(#kg-${t.key})`} fillOpacity={1} />
             ))}
           </AreaChart>
         </ResponsiveContainer>
+      </div>
+    </div>
+  )
+}
+
+// ── ANALYTICS VIEW ────────────────────────────────────────────────────────────
+function AnalyticsView({ onRemoveNode, removedNode }) {
+  const [sortBy, setSortBy] = useState("betweenness")
+
+  const activeNodes = useMemo(() =>
+    removedNode != null ? NODES.filter(n => n.id !== removedNode) : NODES
+    , [removedNode])
+  const activeEdges = useMemo(() => {
+    if (removedNode == null) return EDGES
+    return EDGES.filter(([a, b]) => a !== removedNode && b !== removedNode)
+  }, [removedNode])
+
+  const degree = useMemo(() => computeDegreeCentrality(activeNodes, activeEdges), [activeNodes, activeEdges])
+  const betweenness = useMemo(() => computeBetweennessCentrality(activeNodes, activeEdges), [activeNodes, activeEdges])
+  const pagerank = useMemo(() => computePageRank(activeNodes, activeEdges), [activeNodes, activeEdges])
+  const interdisc = useMemo(() => {
+    const r = {}
+    activeNodes.forEach(n => { r[n.id] = computeInterdisciplinaryScore(n.id, activeEdges, activeNodes) })
+    return r
+  }, [activeNodes, activeEdges])
+
+  const networkInfo = useMemo(() => countConnectedComponents(activeNodes, activeEdges), [activeNodes, activeEdges])
+  const density = useMemo(() => computeNetworkDensity(activeNodes.length, activeEdges.length), [activeNodes, activeEdges])
+
+  // Baseline (full network) for comparison
+  const baselineInfo = useMemo(() => countConnectedComponents(NODES, EDGES), [])
+  const baselineDensity = useMemo(() => computeNetworkDensity(NODES.length, EDGES.length), [])
+
+  const sorted = useMemo(() => {
+    const list = activeNodes.map(n => ({
+      ...n,
+      degree: degree[n.id] || 0,
+      betweenness: betweenness[n.id] || 0,
+      pagerank: pagerank[n.id] || 0,
+      interdisciplinary: interdisc[n.id] || 0,
+    }))
+    list.sort((a, b) => b[sortBy] - a[sortBy])
+    return list
+  }, [activeNodes, degree, betweenness, pagerank, interdisc, sortBy])
+
+  const maxBetweenness = Math.max(...sorted.map(n => n.betweenness), 0.001)
+  const maxPagerank = Math.max(...sorted.map(n => n.pagerank), 0.001)
+  const removedNodeObj = removedNode != null ? NODES.find(n => n.id === removedNode) : null
+
+  return (
+    <div>
+      {/* Network-level stats */}
+      <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+        <StatCard label="Nodes" value={activeNodes.length} sub={removedNode != null ? `−1 from ${NODES.length}` : `of ${NODES.length}`} />
+        <StatCard label="Edges" value={activeEdges.length} sub={removedNode != null ? `−${EDGES.length - activeEdges.length} from ${EDGES.length}` : `collaborations`} color={C.blue} />
+        <StatCard label="Components" value={networkInfo.components}
+          sub={networkInfo.components > 1 ? `⚠ network fragmented` : "fully connected"}
+          color={networkInfo.components > 1 ? C.danger : DOMAINS.BIO.color} />
+        <StatCard label="Density" value={density.toFixed(3)}
+          sub={removedNode != null ? `was ${baselineDensity.toFixed(3)}` : "edge probability"}
+          color={DOMAINS.SOC.color} />
+      </div>
+
+      {/* What-If Simulation */}
+      <div style={{
+        background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 18px",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.04)", marginBottom: 16
+      }}>
+        <div style={{ color: C.muted, fontSize: 10, fontWeight: 600, letterSpacing: "0.14em", marginBottom: 12 }}>
+          ◇  WHAT-IF SIMULATION  ·  NETWORK RESILIENCE
+        </div>
+        <div style={{ fontSize: 12, color: C.text, marginBottom: 12, lineHeight: 1.6 }}>
+          Remove an institution to analyze its structural importance. See how the network fragments,
+          which nodes become isolated, and how centrality redistributes.
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          <button onClick={() => onRemoveNode(null)} style={{
+            background: removedNode == null ? C.accent : "transparent",
+            border: `1px solid ${removedNode == null ? C.accent : C.border}`,
+            color: removedNode == null ? "#fff" : C.muted,
+            borderRadius: 20, padding: "5px 14px", fontSize: 10, cursor: "pointer", fontWeight: 600,
+          }}>FULL NETWORK</button>
+          {NODES.slice(0, 12).map(n => (
+            <button key={n.id} onClick={() => onRemoveNode(removedNode === n.id ? null : n.id)} style={{
+              background: removedNode === n.id ? C.danger : "transparent",
+              border: `1px solid ${removedNode === n.id ? C.danger : C.border}`,
+              color: removedNode === n.id ? "#fff" : C.muted,
+              borderRadius: 20, padding: "5px 12px", fontSize: 10, cursor: "pointer", fontWeight: 500,
+            }}>−{n.name}</button>
+          ))}
+        </div>
+        {removedNodeObj && (
+          <div style={{
+            marginTop: 14, padding: "12px 14px", background: "#fef2f2", border: "1px solid #fecaca",
+            borderRadius: 8, fontSize: 11, color: "#991b1b"
+          }}>
+            <strong>Removed: {removedNodeObj.name}</strong> ({DOMAINS[removedNodeObj.domain].label}, ${removedNodeObj.funding}M)
+            <br />
+            Lost <strong>{EDGES.length - activeEdges.length}</strong> collaborations.
+            {networkInfo.components > 1 && <> Network split into <strong>{networkInfo.components} components</strong> — largest has {networkInfo.largestComponent} nodes.</>}
+            {networkInfo.components === 1 && <> Network remains connected.</>}
+          </div>
+        )}
+      </div>
+
+      {/* Centrality Rankings Table */}
+      <div style={{
+        background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "16px 18px",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.04)"
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ color: C.muted, fontSize: 10, fontWeight: 600, letterSpacing: "0.14em" }}>
+            CENTRALITY METRICS  ·  NODE IMPORTANCE RANKING
+          </div>
+          <div style={{ display: "flex", gap: 4 }}>
+            {[
+              { id: "betweenness", label: "Betweenness" },
+              { id: "degree", label: "Degree" },
+              { id: "pagerank", label: "PageRank" },
+              { id: "interdisciplinary", label: "Diversity" },
+            ].map(s => (
+              <button key={s.id} onClick={() => setSortBy(s.id)} style={{
+                background: sortBy === s.id ? C.accent : "transparent",
+                border: `1px solid ${sortBy === s.id ? C.accent : C.border}`,
+                color: sortBy === s.id ? "#fff" : C.muted,
+                borderRadius: 4, padding: "3px 10px", fontSize: 9, cursor: "pointer", fontWeight: 600,
+              }}>{s.label}</button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+            <thead>
+              <tr style={{ borderBottom: `2px solid ${C.border}` }}>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: C.muted, fontWeight: 700, fontSize: 9, letterSpacing: "0.1em" }}>#</th>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: C.muted, fontWeight: 700, fontSize: 9, letterSpacing: "0.1em" }}>INSTITUTION</th>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: C.muted, fontWeight: 700, fontSize: 9, letterSpacing: "0.1em" }}>DOMAIN</th>
+                <th style={{ textAlign: "right", padding: "8px 6px", color: C.muted, fontWeight: 700, fontSize: 9, letterSpacing: "0.1em" }}>DEGREE</th>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: C.muted, fontWeight: 700, fontSize: 9, letterSpacing: "0.1em", minWidth: 120 }}>BETWEENNESS</th>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: C.muted, fontWeight: 700, fontSize: 9, letterSpacing: "0.1em", minWidth: 100 }}>PAGERANK</th>
+                <th style={{ textAlign: "left", padding: "8px 6px", color: C.muted, fontWeight: 700, fontSize: 9, letterSpacing: "0.1em", minWidth: 100 }}>DIVERSITY</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((n, i) => (
+                <tr key={n.id} style={{
+                  borderBottom: `1px solid ${C.gridLine}`,
+                  background: i === 0 ? C.highlight : "transparent"
+                }}>
+                  <td style={{ padding: "7px 6px", fontWeight: 700, color: C.muted }}>{i + 1}</td>
+                  <td style={{ padding: "7px 6px", fontWeight: 600, color: C.text }}>{n.name}</td>
+                  <td style={{ padding: "7px 6px" }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: DOMAINS[n.domain].color, fontWeight: 500, fontSize: 10 }}>
+                      <span style={{ width: 6, height: 6, borderRadius: "50%", background: DOMAINS[n.domain].color }} />
+                      {DOMAINS[n.domain].label}
+                    </span>
+                  </td>
+                  <td style={{ padding: "7px 6px", textAlign: "right", fontWeight: 600, color: C.text }}>
+                    {n.degree.toFixed(3)}
+                  </td>
+                  <td style={{ padding: "7px 6px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ flex: 1, height: 5, background: C.gridLine, borderRadius: 3, overflow: "hidden" }}>
+                        <div style={{
+                          height: "100%", width: `${(n.betweenness / maxBetweenness) * 100}%`,
+                          background: C.accent, borderRadius: 3, transition: "width 0.3s"
+                        }} />
+                      </div>
+                      <span style={{ fontWeight: 600, color: C.text, fontSize: 10, minWidth: 35 }}>{n.betweenness.toFixed(3)}</span>
+                    </div>
+                  </td>
+                  <td style={{ padding: "7px 6px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ flex: 1, height: 5, background: C.gridLine, borderRadius: 3, overflow: "hidden" }}>
+                        <div style={{
+                          height: "100%", width: `${(n.pagerank / maxPagerank) * 100}%`,
+                          background: C.blue, borderRadius: 3, transition: "width 0.3s"
+                        }} />
+                      </div>
+                      <span style={{ fontWeight: 600, color: C.text, fontSize: 10, minWidth: 35 }}>{n.pagerank.toFixed(3)}</span>
+                    </div>
+                  </td>
+                  <td style={{ padding: "7px 6px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <div style={{ flex: 1, height: 5, background: C.gridLine, borderRadius: 3, overflow: "hidden" }}>
+                        <div style={{
+                          height: "100%", width: `${n.interdisciplinary * 100}%`,
+                          background: DOMAINS.SOC.color, borderRadius: 3, transition: "width 0.3s"
+                        }} />
+                      </div>
+                      <span style={{ fontWeight: 600, color: C.text, fontSize: 10, minWidth: 35 }}>{n.interdisciplinary.toFixed(2)}</span>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{
+          marginTop: 14, padding: "10px 12px", background: "#f0fdfa", border: "1px solid #ccfbf1",
+          borderRadius: 6, fontSize: 10, color: "#115e59", lineHeight: 1.7
+        }}>
+          <strong>Metrics Guide:</strong>
+          <strong> Degree</strong> = fraction of possible connections realized.
+          <strong> Betweenness</strong> = frequency on shortest paths (bridge nodes score high).
+          <strong> PageRank</strong> = importance via connection quality (linked by important nodes).
+          <strong> Diversity</strong> = Simpson's Index across neighbor domains (1.0 = max interdisciplinary).
+        </div>
       </div>
     </div>
   )
@@ -498,6 +824,7 @@ export default function App() {
   const [tab, setTab] = useState("network")
   const [domain, setDomain] = useState("ALL")
   const [selected, setSelected] = useState(null)
+  const [removedNode, setRemovedNode] = useState(null)
 
   const topNode = NODES.reduce((a, b) => a.funding > b.funding ? a : b)
   const totalFund = NODES.reduce((s, n) => s + n.funding, 0)
@@ -506,6 +833,7 @@ export default function App() {
     { id: "network", label: "◈  Network" },
     { id: "trends", label: "◉  Funding Trends" },
     { id: "topics", label: "◆  Topic Evolution" },
+    { id: "analytics", label: "◇  Analytics" },
   ]
 
   const connCount = selected
@@ -650,36 +978,26 @@ export default function App() {
         <div style={{ flex: 1, padding: "22px 28px", minWidth: 0 }}>
 
           {/* Tab bar */}
-          <div style={{
-            display: "flex", gap: 2, marginBottom: 20,
-            borderBottom: `1px solid ${C.border}`
-          }}>
+          <div style={{ display: "flex", gap: 2, marginBottom: 20, borderBottom: `1px solid ${C.border}` }}>
             {tabs.map(t => (
-              <button key={t.id} onClick={() => setTab(t.id)}
-                style={{
-                  background: "transparent", border: "none",
-                  borderBottom: `2px solid ${tab === t.id ? C.accent : "transparent"}`,
-                  color: tab === t.id ? C.accent : C.muted,
-                  padding: "8px 18px 10px", fontSize: 11,
-                  letterSpacing: "0.1em",
-                  cursor: "pointer", fontWeight: tab === t.id ? 700 : 500,
-                }}>
+              <button key={t.id} onClick={() => setTab(t.id)} style={{
+                background: "transparent", border: "none",
+                borderBottom: `2px solid ${tab === t.id ? C.accent : "transparent"}`,
+                color: tab === t.id ? C.accent : C.muted,
+                padding: "8px 18px 10px", fontSize: 11, letterSpacing: "0.1em",
+                cursor: "pointer", fontWeight: tab === t.id ? 700 : 500,
+              }}>
                 {t.label.toUpperCase()}
               </button>
             ))}
           </div>
 
-          {/* Hint text */}
-          {tab === "network" && (
-            <div style={{ color: C.muted, fontSize: 9, letterSpacing: "0.12em", marginBottom: 12, fontWeight: 500 }}>
-              NODE SIZE = NSF FUNDING  ·  HOVER TO HIGHLIGHT CONNECTIONS  ·  DRAG TO REARRANGE  ·  CLICK TO PIN DETAIL
-            </div>
-          )}
-
-          {/* Views */}
           {tab === "network" && (
             <>
-              <NetworkGraph domainFilter={domain} onSelect={setSelected} selected={selected} />
+              <div style={{ color: C.muted, fontSize: 9, letterSpacing: "0.12em", marginBottom: 12, fontWeight: 500 }}>
+                NODE SIZE = NSF FUNDING  ·  HOVER TO HIGHLIGHT CONNECTIONS  ·  DRAG TO REARRANGE  ·  CLICK TO PIN DETAIL
+              </div>
+              <NetworkGraph domainFilter={domain} onSelect={setSelected} selected={selected} removedNode={removedNode} />
               <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 12 }}>
                 {Object.entries(DOMAINS).map(([k, d]) => (
                   <div key={k} style={{
@@ -695,6 +1013,7 @@ export default function App() {
           )}
           {tab === "trends" && <TrendsView />}
           {tab === "topics" && <TopicsView />}
+          {tab === "analytics" && <AnalyticsView onRemoveNode={setRemovedNode} removedNode={removedNode} />}
         </div>
       </div>
     </div>
