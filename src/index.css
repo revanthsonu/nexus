@@ -1,13 +1,51 @@
-body {
+/* ═══════════════════════════════════════════════════════════════
+   NEXUS — NSF Research Intelligence 
+   Premium Light Theme
+   ═══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700;800&family=DM+Serif+Display&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  padding: 0;
 }
 
-code {
-  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
-    monospace;
+html {
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  background: #f7f5f2;
+  color: #1a1523;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+button {
+  transition: all 0.15s ease;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  opacity: 0.88;
+}
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f0ede8;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #ccc5ba;
+  border-radius: 4px;
 }

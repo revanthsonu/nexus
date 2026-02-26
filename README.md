@@ -1,70 +1,76 @@
-# Getting Started with Create React App
+# Nexus — NSF Research Intelligence Dashboard
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+> An interactive data visualization platform that maps research collaboration networks, funding trends, and topic evolution across **25 top US research institutions** using NSF grant data (2018–2023).
 
-## Available Scripts
+Built to demonstrate **data visualization engineering** and **interactive analytics**: force-directed network graphs with D3.js, temporal funding analysis with Recharts, and real-time domain filtering — all rendered client-side with React.
 
-In the project directory, you can run:
+---
 
-### `npm start`
+## Features
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+### 🔗 Collaboration Network
+Interactive D3 force-directed graph showing inter-institutional research partnerships. Node size encodes NSF funding volume. Hover to highlight connections, drag to rearrange, click to pin detail panels.
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+### 📈 Funding Trends
+Stacked area charts visualizing NSF funding allocation across 5 research domains (CS, Life Sciences, Physics, Engineering, Social Sciences) from 2018–2023, with per-domain bar comparison.
 
-### `npm test`
+### 🔬 Topic Evolution
+Filterable keyword trend analysis tracking 7 research topics (Machine Learning, Deep Learning, NLP, Quantum Computing, Bioinformatics, Robotics, Public Health) with interactive topic toggle pills.
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+---
 
-### `npm run build`
+## Tech Stack
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+| Layer | Technologies |
+|---|---|
+| **Visualization** | D3.js (force simulation, drag, scales) · Recharts (area, bar charts) |
+| **Frontend** | React 19 · Create React App |
+| **Data** | Static NSF grant dataset · Client-side filtering & aggregation |
+| **Design** | DM Serif Display + JetBrains Mono typography · Warm light theme |
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+---
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+## Architecture
 
-### `npm run eject`
+```
+nexus/
+├── public/
+│   └── index.html
+└── src/
+    ├── App.js              # Main application (data, components, layout)
+    ├── index.css            # Light theme design system
+    └── index.js             # React entry point
+```
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+### Key Components
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+| Component | Purpose |
+|---|---|
+| `NetworkGraph` | D3 force-directed graph with ResizeObserver, drag behavior, hover tooltips |
+| `TrendsView` | Recharts stacked area + bar charts for funding analysis |
+| `TopicsView` | Filterable topic evolution with toggle pills |
+| `StatCard` | Reusable KPI card with accent-colored top border |
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+---
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+## Quick Start
 
-## Learn More
+```bash
+npm install
+npm start         # Dev server on localhost:3000
+```
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+### Production Build
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+```bash
+npm run build     # Outputs to build/
+```
 
-### Code Splitting
+---
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+## Data Coverage
 
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+- **25 institutions**: MIT, Stanford, Harvard, CMU, UC Berkeley, Caltech, Cornell, Princeton, Georgia Tech, and more
+- **5 research domains**: Computer Science, Life Sciences, Physics & Math, Engineering, Social Sciences
+- **7 topic keywords**: Machine Learning, Deep Learning, NLP, Quantum Computing, Bioinformatics, Robotics, Public Health
+- **6-year span**: 2018–2023 NSF funding data
